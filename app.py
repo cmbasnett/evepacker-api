@@ -91,9 +91,9 @@ def parse_quantity(s) -> int:
 
 def parse_items(blob):
     lines = blob.split('\n')
-    quantity_column_index = -1
-    volume_column_index = -1
-    price_column_index = -1
+    quantity_column_index = None
+    volume_column_index = None
+    price_column_index = None
     line = lines[0]
     values = line.split('\t')
     for column_index, value in enumerate(values):
@@ -111,6 +111,8 @@ def parse_items(blob):
         item.price = parse_price(values[price_column_index])
         item.volume = parse_volume(values[volume_column_index])
         item.quantity = parse_quantity(values[quantity_column_index])
+        item.price = parse_price(values[price_column_index]) if price_column_index is not None else 0
+        item.volume = Decimal(db_item['volume']) * item.quantity if volume_column_index is None else parse_volume(values[volume_column_index])
         items.append(item)
     return items
 
@@ -147,6 +149,7 @@ def pack_items(items, volume: Decimal, should_allow_splitting: False):
                     new_item.quantity = quantity
                     new_item.volume = vpu * quantity
                     new_item.price = ppu * quantity
+                    new_item.typeid = item.typeid
                     new_item.is_split = True
                     packed_items.append(new_item)
                     volume -= new_item.volume
@@ -179,6 +182,14 @@ def pack_items(items, volume: Decimal, should_allow_splitting: False):
     return packed_items
 
 
+def get_total_volume(items):
+    return float(sum(map(lambda x: x.volume, items)))
+
+
+def get_total_price(items):
+    return float(sum(map(lambda x: x.price, items)))
+
+
 @app.route('/api/pack', methods=['POST'])
 @cross_origin()
 def pack():
@@ -186,14 +197,14 @@ def pack():
     should_allow_splitting = bool(request.json.get('should_allow_splitting', True))
     items = parse_items(request.json['blob'])
     packed_items = pack_items(items, volume, should_allow_splitting)
-    total_value = sum(map(lambda x: x.price, packed_items))
-    total_volume = sum(map(lambda x: x.volume, packed_items))
     return jsonify({
-        'total_price': str(total_value),
-        'total_volume': str(total_volume),
+        'price': get_total_price(packed_items),
+        'volume': get_total_volume(packed_items),
+        'total_price': get_total_price(items),
+        'total_volume': get_total_volume(items),
         'items': list(map(lambda x: {
             'name': x.name,
-            'typeid': name_type_ids.get(x.name, None),
+            'typeid': x.typeid,
             'quantity': x.quantity,
             'is_split': x.is_split,
             'volume': str(x.volume),
@@ -203,7 +214,3 @@ def pack():
 
 if __name__ == '__main__':
     app.run(host='0.0.0.0', port=5000)
-
-db = sqlite3.connect('sqlite-latest.sqlite')
-build_typid_map(db)
-
