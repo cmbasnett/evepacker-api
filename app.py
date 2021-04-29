@@ -6,40 +6,21 @@ from flask_cors import CORS, cross_origin
 import json
 import re
 import sqlite3
+from flask_redis import FlaskRedis
 
 app = Flask(__name__)
+redis_client = FlaskRedis(app)
 CORS(app)
 
 
-db = None
-name_type_ids = dict()
-
-
-def build_typid_map(db):
-    global name_type_ids
+def populate_redis_cache():
+    db = sqlite3.connect('sqlite-latest.sqlite')
     cursor = db.cursor()
-    query = f'SELECT typeName, typeID FROM invTypes;'
+    query = f'SELECT typeName, typeID, volume FROM invTypes;'
     cursor.execute(query)
-    name_type_ids = {x[0]: x[1] for x in cursor.fetchall()}
-
-
-def get_typeid_from_name(db, name):
-    cursor = db.cursor()
-    query = f'SELECT typeId FROM invTypes WHERE typeName = "{name}";'
-    cursor.execute(query)
-    row = cursor.fetchone()
-    if row is None:
-        return None
-    return row[0]
-
-
-def get_typeids_from_names(db, names):
-    cursor = db.cursor()
-    names = ','.join(map(lambda x: f'\"{x}\"', names))
-    query = f'SELECT typeId FROM invTypes WHERE typeName IN ({names});'
-    cursor.execute(query)
-    type_ids = cursor.fetchall()
-    return type_ids
+    print('Populating redis cache...')
+    for name, type_id, volume in cursor.fetchall():
+        redis_client.set(name, json.dumps({'typeId': type_id, 'volume': volume}))
 
 
 class Item:
@@ -108,8 +89,10 @@ def parse_items(blob):
         values = line.split('\t')
         item = Item()
         item.name = values[0]
-        item.price = parse_price(values[price_column_index])
-        item.volume = parse_volume(values[volume_column_index])
+        db_item = redis_client.get(item.name)
+        if db_item is not None:
+            db_item = json.loads(db_item)
+        item.typeid = db_item.get('typeId', None) if db_item is not None else None
         item.quantity = parse_quantity(values[quantity_column_index])
         item.price = parse_price(values[price_column_index]) if price_column_index is not None else 0
         item.volume = Decimal(db_item['volume']) * item.quantity if volume_column_index is None else parse_volume(values[volume_column_index])
@@ -124,9 +107,10 @@ class Packing:
         self.price = Decimal()
 
 
-def pack_items(items, volume: Decimal, should_allow_splitting: False):
+def pack_items(items, volume: Decimal, should_allow_splitting: False, value_limit: Decimal('inf')):
     # The solver only works with integers, so we need to multiply the volumes
     # so all significant figures are represented.
+    value = value_limit
     if should_allow_splitting:
         # fractional knapsack problem
         packed_items = []
@@ -134,25 +118,29 @@ def pack_items(items, volume: Decimal, should_allow_splitting: False):
         for item in items:
             if volume < 0:
                 break
-            if item.volume < volume:
+            if item.volume < volume and item.price < value:
                 packed_items.append(item)
                 volume -= item.volume
+                value -= item.price
             else:
                 quantity = int(volume / item.volume_per_unit)
+                if value.is_finite():
+                    quantity = min(quantity, int(value / item.price_per_unit))
                 if quantity < 1:
                     continue
                 else:
-                    vpu = item.volume_per_unit
-                    ppu = item.price_per_unit
+                    volume_per_unit = item.volume_per_unit
+                    price_per_unit = item.price_per_unit
                     new_item = Item()
                     new_item.name = item.name
                     new_item.quantity = quantity
-                    new_item.volume = vpu * quantity
-                    new_item.price = ppu * quantity
+                    new_item.volume = volume_per_unit * quantity
+                    new_item.price = price_per_unit * quantity
                     new_item.typeid = item.typeid
                     new_item.is_split = True
                     packed_items.append(new_item)
                     volume -= new_item.volume
+                    value -= new_item.price
 
     else:
         values = list(map(lambda x: x.price, items))
@@ -167,16 +155,14 @@ def pack_items(items, volume: Decimal, should_allow_splitting: False):
         solver.Init(values, weights, capacities)
         solver.Solve()
         packed_items = []
-        packed_weights = []
-        total_weight = 0
 
         for i in range(len(values)):
             if solver.BestSolutionContains(i):
+                if values[i] > value:
+                    continue
                 packed_items.append(i)
-                packed_weights.append(weights[0][i])
-                total_weight += weights[0][i]
+                value -= values[i]
 
-        packed_items = [x for x in range(0, len(weights[0])) if solver.BestSolutionContains(x)]
         packed_items = [items[p] for p in packed_items]
 
     return packed_items
@@ -195,8 +181,9 @@ def get_total_price(items):
 def pack():
     volume = Decimal(request.json['volume'].replace(',', ''))
     should_allow_splitting = bool(request.json.get('should_allow_splitting', True))
+    value_limit = Decimal(request.json.get('value_limit', Decimal('inf')))
     items = parse_items(request.json['blob'])
-    packed_items = pack_items(items, volume, should_allow_splitting)
+    packed_items = pack_items(items, volume, should_allow_splitting, value_limit)
     return jsonify({
         'price': get_total_price(packed_items),
         'volume': get_total_volume(packed_items),
@@ -214,3 +201,5 @@ def pack():
 
 if __name__ == '__main__':
     app.run(host='0.0.0.0', port=5000)
+
+# populate_redis_cache()
