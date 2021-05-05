@@ -1,4 +1,4 @@
-from flask import Flask, request, jsonify
+from flask import Flask, request, jsonify, abort
 from collections import namedtuple
 from decimal import Decimal, InvalidOperation
 from ortools.algorithms.pywrapknapsack_solver import KnapsackSolver
@@ -84,6 +84,10 @@ def parse_items(blob):
             price_column_index = column_index
         elif re.match(r'\d+', value) is not None:
             quantity_column_index = column_index
+    if quantity_column_index is None:
+        raise RuntimeError('Unable to determine quantity column')
+    if price_column_index is None:
+        raise RuntimeError('Unable to determine est. price column')
     items = []
     for line in lines:
         values = line.split('\t')
@@ -182,21 +186,26 @@ def pack():
     volume = Decimal(request.json['volume'].replace(',', ''))
     should_allow_splitting = bool(request.json.get('should_allow_splitting', True))
     value_limit = Decimal(request.json.get('value_limit', Decimal('inf')))
-    items = parse_items(request.json['blob'])
-    packed_items = pack_items(items, volume, should_allow_splitting, value_limit)
-    return jsonify({
-        'price': get_total_price(packed_items),
-        'volume': get_total_volume(packed_items),
-        'total_price': get_total_price(items),
-        'total_volume': get_total_volume(items),
-        'items': list(map(lambda x: {
-            'name': x.name,
-            'typeid': x.typeid,
-            'quantity': x.quantity,
-            'is_split': x.is_split,
-            'volume': str(x.volume),
-            'price': str(x.price)}, packed_items))
-    })
+    if not should_allow_splitting and value_limit.is_finite():
+        raise ValueError('Cannot limit value if stack splitting is disabled')
+    try:
+        items = parse_items(request.json['blob'])
+        packed_items = pack_items(items, volume, should_allow_splitting, value_limit)
+        return jsonify({
+            'price': get_total_price(packed_items),
+            'volume': get_total_volume(packed_items),
+            'total_price': get_total_price(items),
+            'total_volume': get_total_volume(items),
+            'items': list(map(lambda x: {
+                'name': x.name,
+                'typeid': x.typeid,
+                'quantity': x.quantity,
+                'is_split': x.is_split,
+                'volume': str(x.volume),
+                'price': str(x.price)}, packed_items))
+        })
+    except RuntimeError as error:
+        abort(400, str(error))
 
 
 if __name__ == '__main__':
