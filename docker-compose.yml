@@ -1,0 +1,6 @@
+services:
+  api:
+    build: .
+    image: evepacker-api:1.0
+    ports:
+      - "5000:5000"

@@ -180,14 +180,32 @@ def get_total_price(items):
     return float(sum(map(lambda x: x.price, items)))
 
 
+@app.route('/api/ping', methods=['GET'])
+@cross_origin()
+def ping():
+    return jsonify({'ping': 'pong'}), 200
+
+
 @app.route('/api/pack', methods=['POST'])
 @cross_origin()
 def pack():
-    volume = Decimal(request.json['volume'].replace(',', ''))
+    # Volume
+    try:
+        volume = Decimal(request.json['volume'].replace(',', ''))
+    except InvalidOperation as e:
+        return jsonify(message='Volume cannot be parsed'), 400
     should_allow_splitting = bool(request.json.get('should_allow_splitting', True))
-    value_limit = Decimal(request.json.get('value_limit', Decimal('inf')))
+
+    # Value Limit
+    value_limit = Decimal('inf')
+    try:
+        value_limit = Decimal(request.json.get('value_limit', Decimal('inf')))
+    except InvalidOperation:
+        return jsonify(message='Value limit cannot be parsed'), 400
+
     if not should_allow_splitting and value_limit.is_finite():
-        raise ValueError('Cannot limit value if stack splitting is disabled')
+        return jsonify(message='Cannot limit value if stack splitting is disabled'), 400
+
     try:
         items = parse_items(request.json['blob'])
         packed_items = pack_items(items, volume, should_allow_splitting, value_limit)
@@ -205,7 +223,7 @@ def pack():
                 'price': str(x.price)}, packed_items))
         })
     except RuntimeError as error:
-        abort(400, str(error))
+        return jsonify(message=error), 400
 
 
 if __name__ == '__main__':
